@@ -3,13 +3,12 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { doc, getDoc, setDoc, collection, getDocs } from 'firebase/firestore';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { db, auth } from './firebase';
-import Landing from './Landing';
 import Auth from './Auth';
+import Landing from './Landing';
 import AdminPanel from './AdminPanel';
-import { seedProducts } from './seed';
 
 // ─────────────────────────────────────────────
-// Gemini setup
+// Gemini
 // ─────────────────────────────────────────────
 const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-3.8-flash' });
@@ -31,7 +30,7 @@ const CATEGORIES = ['all', 'groceries', 'toiletries', 'clothing', 'stationery', 
 const MAX_HISTORY = 20;
 
 // ─────────────────────────────────────────────
-// Rule-based fallback scoring
+// Rule-based fallback
 // ─────────────────────────────────────────────
 function scoreProduct(product, remaining, prefs) {
   let score = 0;
@@ -88,15 +87,19 @@ export default function App() {
   // Auth
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [authView, setAuthView] = useState('landing'); // 'landing' | 'auth'
-  const [authRole, setAuthRole] = useState('student'); // 'student' | 'admin'
-  const [roleError, setRoleError] = useState(''); // shown if admin-role user doesn't have claim
+  const [authView, setAuthView] = useState('landing');
+  const [authRole, setAuthRole] = useState('student');
+  const [roleError, setRoleError] = useState('');
+
+  // Admin
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
 
   // Core data
   const [budget, setBudget] = useState(1000);
   const [items, setItems] = useState([]);
   const [products, setProducts] = useState([]);
-  const [history, setHistory] = useState([]); // [{type, id, name, query, ts}]
+  const [history, setHistory] = useState([]);
 
   // Manual add
   const [name, setName] = useState('');
@@ -120,10 +123,17 @@ export default function App() {
   // DB
   const [dbLoading, setDbLoading] = useState(true);
   const [dbStatus, setDbStatus] = useState('Loading from cloud...');
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [showAdmin, setShowAdmin] = useState(false);
+
+  // Toast
+  const [toast, setToast] = useState('');
 
   const userId = user?.uid;
+
+  // ── Toast ──
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 2200);
+  };
 
   // ── Auth listener ──
   useEffect(() => {
@@ -131,17 +141,15 @@ export default function App() {
       setUser(u);
       setAuthChecked(true);
 
-      // Check if user has admin claim
       if (u) {
         try {
           const token = await u.getIdTokenResult();
           const hasAdminClaim = !!token.claims.admin;
           setIsAdmin(hasAdminClaim);
 
-          // If user picked "Admin" but doesn't have the claim → sign them out
           if (authRole === 'admin' && !hasAdminClaim) {
-             setRoleError('This account is not an admin.');
-             await signOut(auth);
+            setRoleError('This account is not an admin.');
+            await signOut(auth);
           } else {
             setRoleError('');
           }
@@ -155,16 +163,16 @@ export default function App() {
       }
     });
     return () => unsub();
-  }, []);
+  }, [authRole]);
 
-  // ── Load products from Firestore ──
+  // ── Load products ──
   useEffect(() => {
     async function loadProducts() {
       try {
         const snap = await getDocs(collection(db, 'products'));
         const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         setProducts(list);
-        console.log(`✅ Loaded ${list.length} products from Firestore`);
+        console.log(`✅ Loaded ${list.length} products`);
       } catch (err) {
         console.error('Products load error:', err);
       }
@@ -176,7 +184,6 @@ export default function App() {
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
-
     async function load() {
       setDbLoading(true);
       setDbStatus('Loading from cloud...');
@@ -184,7 +191,6 @@ export default function App() {
         const ref = doc(db, 'users', userId);
         const snap = await getDoc(ref);
         if (cancelled) return;
-
         if (snap.exists()) {
           const data = snap.data() || {};
           if (typeof data.budget === 'number') setBudget(data.budget);
@@ -195,11 +201,9 @@ export default function App() {
           } else {
             setPrefs({ ...DEFAULT_PREFS });
           }
-          setDbStatus('✅ Loaded from cloud');
+          setDbStatus('');
         } else {
-          setBudget(1000);
-          setItems([]);
-          setHistory([]);
+          setBudget(1000); setItems([]); setHistory([]);
           setPrefs({ ...DEFAULT_PREFS });
           setDbStatus('🆕 Welcome — data saves automatically');
         }
@@ -211,22 +215,17 @@ export default function App() {
         if (!cancelled) setDbLoading(false);
       }
     }
-
     load();
     return () => { cancelled = true; };
   }, [userId]);
 
-  // ── Save user data (debounced) ──
+  // ── Save user data ──
   useEffect(() => {
     if (dbLoading || !userId) return;
     const timer = setTimeout(async () => {
       try {
         const ref = doc(db, 'users', userId);
-        await setDoc(
-          ref,
-          { budget, items, prefs, history, updatedAt: Date.now() },
-          { merge: true }
-        );
+        await setDoc(ref, { budget, items, prefs, history, updatedAt: Date.now() }, { merge: true });
       } catch (err) {
         console.error('Firestore save error:', err);
       }
@@ -234,58 +233,42 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [budget, items, prefs, history, userId, dbLoading]);
 
-  // ─────────────────────────────────────────────
-  // History helpers
-  // ─────────────────────────────────────────────
+  // ── History ──
   const pushHistory = (event) => {
-    setHistory(prev => {
-      const next = [{ ...event, ts: Date.now() }, ...prev].slice(0, MAX_HISTORY);
-      return next;
-    });
+    setHistory(prev => [{ ...event, ts: Date.now() }, ...prev].slice(0, MAX_HISTORY));
   };
-
-  const trackView = (product) => {
-    pushHistory({ type: 'view', id: product.id, name: product.name });
-  };
-
+  const trackView = (product) => pushHistory({ type: 'view', id: product.id, name: product.name });
   const trackSearch = (query) => {
     if (!query || query.trim().length < 2) return;
     pushHistory({ type: 'search', query: query.trim() });
   };
-
   const clearHistory = () => {
     if (confirm('Clear all shopping history?')) setHistory([]);
   };
 
-  // Derived history views
   const recentViews = [];
   const seenIds = new Set();
   for (const h of history) {
     if (h.type === 'view' && !seenIds.has(h.id)) {
-      seenIds.add(h.id);
-      recentViews.push(h);
+      seenIds.add(h.id); recentViews.push(h);
       if (recentViews.length >= 5) break;
     }
   }
-
   const recentSearches = [];
   const seenQueries = new Set();
   for (const h of history) {
     if (h.type === 'search' && !seenQueries.has(h.query)) {
-      seenQueries.add(h.query);
-      recentSearches.push(h);
+      seenQueries.add(h.query); recentSearches.push(h);
       if (recentSearches.length >= 5) break;
     }
   }
 
-  // ─────────────────────────────────────────────
-  // Filtering + ranking
-  // ─────────────────────────────────────────────
+  // ── Derived ──
   const total = items.reduce((s, i) => s + Number(i.price), 0);
   const remaining = budget - total;
 
+  // ── Filtering ──
   let filtered = products;
-
   if (search.trim()) {
     const q = search.toLowerCase();
     filtered = filtered.filter(p =>
@@ -294,46 +277,30 @@ export default function App() {
       p.category.toLowerCase().includes(q)
     );
   }
+  if (category !== 'all') filtered = filtered.filter(p => p.category === category);
+  if (maxPrice && Number(maxPrice) > 0) filtered = filtered.filter(p => p.price <= Number(maxPrice));
 
-  if (category !== 'all') {
-    filtered = filtered.filter(p => p.category === category);
-  }
-
-  if (maxPrice && Number(maxPrice) > 0) {
-    filtered = filtered.filter(p => p.price <= Number(maxPrice));
-  }
-
+  // ── Ranking ──
   if (aiResults && aiResults.length) {
     const aiMap = new Map(aiResults.map(r => [r.productId, r]));
-    filtered = filtered
-      .filter(p => aiMap.has(p.id))
-      .map(p => {
-        const r = aiMap.get(p.id);
-        return { ...p, aiScore: r.score, aiReason: r.reason };
-      });
+    filtered = filtered.filter(p => aiMap.has(p.id)).map(p => {
+      const r = aiMap.get(p.id);
+      return { ...p, aiScore: r.score, aiReason: r.reason };
+    });
   } else {
     filtered = filtered.map(p => scoreProduct(p, remaining, prefs));
   }
 
-  if (sortBy === 'ai') {
-    filtered = [...filtered].sort((a, b) => b.aiScore - a.aiScore);
-  } else if (sortBy === 'cheapest') {
-    filtered = [...filtered].sort((a, b) => a.price - b.price);
-  } else {
-    filtered = [...filtered].sort((a, b) => b.price - a.price);
-  }
+  if (sortBy === 'ai') filtered = [...filtered].sort((a, b) => b.aiScore - a.aiScore);
+  else if (sortBy === 'cheapest') filtered = [...filtered].sort((a, b) => a.price - b.price);
+  else filtered = [...filtered].sort((a, b) => b.price - a.price);
 
-  // ─────────────────────────────────────────────
-  // AI ranking with retry
-  // ─────────────────────────────────────────────
+  // ── AI ──
   const rankWithAI = async () => {
     setAiLoading(true);
     setAiError('');
-
     const safePrefs = prefs || DEFAULT_PREFS;
     const candidates = filtered.slice(0, 15);
-
-    // Include recent history in prompt for personalisation
     const historySummary = history.slice(0, 10).map(h =>
       h.type === 'view' ? `viewed "${h.name}"` : `searched "${h.query}"`
     ).join(', ') || 'no history yet';
@@ -377,6 +344,7 @@ Rules:
         if (!Array.isArray(parsed)) throw new Error('Bad AI response shape');
         setAiResults(parsed);
         setAiLoading(false);
+        showToast('✅ Ranked by Gemini AI');
         return;
       } catch (err) {
         lastError = err;
@@ -387,39 +355,30 @@ Rules:
         }
       }
     }
-
     console.error('Gemini error after 3 tries:', lastError);
     setAiError('AI unavailable right now — showing smart fallback. Try again in a moment.');
     setAiResults(null);
     setAiLoading(false);
   };
 
-  const clearAI = () => {
-    setAiResults(null);
-    setAiError('');
-  };
+  const clearAI = () => { setAiResults(null); setAiError(''); };
 
-  // ─────────────────────────────────────────────
-  // Handlers
-  // ─────────────────────────────────────────────
+  // ── Handlers ──
   const addItem = () => {
     if (!name || !price) return;
     setItems([...items, { id: Date.now(), name, price: Number(price) }]);
-    setName('');
-    setPrice('');
+    setName(''); setPrice('');
+    showToast(`✓ Added "${name}"`);
   };
-
   const removeItem = (id) => setItems(items.filter(i => i.id !== id));
-
   const addProductToList = (product) => {
     setItems([...items, { id: Date.now(), name: product.name, price: product.price }]);
     trackView(product);
+    showToast(`✓ Added "${product.name}"`);
   };
-
   const updatePref = (field, value) => {
     setPrefs({ ...(prefs || DEFAULT_PREFS), [field]: value });
   };
-
   const getSuggestion = () => {
     if (remaining < 0) {
       const priciest = [...items].sort((a, b) => b.price - a.price)[0];
@@ -431,28 +390,44 @@ Rules:
     return `🤖 Tip: R${remaining} remaining. Room for ~${Math.floor(remaining / 50)} more small items.`;
   };
 
+  // ── Styles ──
   const inputStyle = {
-    padding: 10, width: '100%', boxSizing: 'border-box',
-    border: '1px solid #ddd', borderRadius: 6, fontSize: 14, marginTop: 6,
+    padding: 12, width: '100%', boxSizing: 'border-box',
+    border: '1px solid #ddd', borderRadius: 8, fontSize: 16,
+    marginTop: 6, WebkitAppearance: 'none',
   };
-
   const labelStyle = {
-    display: 'block', fontSize: 13, fontWeight: 'bold', color: '#444', marginTop: 12,
+    display: 'block', fontSize: 13, fontWeight: 'bold',
+    color: '#444', marginTop: 14,
+  };
+  const primaryButton = {
+    background: 'linear-gradient(90deg, #6c5ce7, #a29bfe)',
+    color: 'white', border: 'none', padding: '14px 18px',
+    borderRadius: 10, fontSize: 15, fontWeight: 'bold',
+    cursor: 'pointer', width: '100%', minHeight: 48,
+    boxShadow: '0 2px 6px rgba(108,92,231,0.3)',
+  };
+  const outlineButton = {
+    background: 'white', color: '#6c5ce7',
+    border: '2px solid #6c5ce7', padding: '12px 16px',
+    borderRadius: 10, fontSize: 14, fontWeight: 'bold',
+    cursor: 'pointer', width: '100%', minHeight: 48,
   };
 
   // ─────────────────────────────────────────────
   // RENDER GATES
   // ─────────────────────────────────────────────
-  // ── Admin panel view ──
+
   if (showAdmin && isAdmin) {
     return <AdminPanel onClose={() => setShowAdmin(false)} />;
   }
+
   if (!authChecked) {
     return (
       <div style={{
         minHeight: '100vh', background: '#f5f6fa',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontFamily: 'system-ui, Arial, sans-serif'
+        fontFamily: 'system-ui, Arial, sans-serif',
       }}>
         <div style={{ color: '#6c5ce7', fontWeight: 'bold' }}>Checking session...</div>
       </div>
@@ -465,20 +440,16 @@ Rules:
         <Landing
           onStudent={() => { setAuthRole('student'); setAuthView('auth'); }}
           onAdmin={() => { setAuthRole('admin'); setAuthView('auth'); }}
-       />
+        />
       );
     }
-
     return (
       <div>
         {roleError && (
           <div style={{
-            background: '#ffe5e5',
-            color: '#c0392b',
-            padding: 12,
-            textAlign: 'center',
-            fontSize: 13,
-            fontWeight: 'bold',
+            background: '#ffe5e5', color: '#c0392b',
+            padding: 12, textAlign: 'center',
+            fontSize: 13, fontWeight: 'bold',
           }}>
             ⚠️ {roleError}
           </div>
@@ -493,8 +464,9 @@ Rules:
             }}
             style={{
               background: 'none', border: 'none',
-              color: '#6c5ce7', fontSize: 12, fontWeight: 'bold',
-              cursor: 'pointer', textDecoration: 'underline',
+              color: '#6c5ce7', fontSize: 12,
+              fontWeight: 'bold', cursor: 'pointer',
+              textDecoration: 'underline',
             }}
           >
             ← Back to home
@@ -504,77 +476,68 @@ Rules:
     );
   }
 
-  if (!user) return <Auth />;
-
   if (dbLoading) {
     return (
-      <div style={{ minHeight: '100vh', background: '#f5f6fa', padding: '30px 20px', fontFamily: 'Arial, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ background: 'white', padding: 30, borderRadius: 12, textAlign: 'center' }}>
+      <div style={{
+        minHeight: '100vh', background: '#f5f6fa',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontFamily: 'system-ui, Arial, sans-serif', padding: 20,
+      }}>
+        <div style={{
+          background: 'white', padding: 30, borderRadius: 14,
+          textAlign: 'center', width: '100%', maxWidth: 340,
+        }}>
           <div style={{ fontSize: 40, marginBottom: 10 }}>☁️</div>
-          <div style={{ fontWeight: 'bold' }}>Loading your data...</div>
+          <div style={{ fontWeight: 'bold', color: '#333' }}>Loading your data...</div>
+          <div style={{ fontSize: 12, color: '#999', marginTop: 8 }}>Fetching from cloud</div>
         </div>
       </div>
     );
   }
 
   // ─────────────────────────────────────────────
-  // MAIN
+  // MAIN APP
   // ─────────────────────────────────────────────
   return (
-    <div style={{ minHeight: '100vh', background: '#f5f6fa', padding: '30px 20px', fontFamily: 'Arial, sans-serif' }}>
-      <div style={{ maxWidth: 520, margin: '0 auto' }}>
+    <div style={{
+      minHeight: '100vh', background: '#f5f6fa',
+      padding: '16px 12px 40px',
+      fontFamily: 'system-ui, -apple-system, "Segoe UI", Arial, sans-serif',
+    }}>
+      <div style={{ maxWidth: 560, margin: '0 auto' }}>
 
         {/* Header */}
         <div style={{
           background: '#6c5ce7', color: 'white',
-          padding: '20px 25px', borderRadius: 12,
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '16px 18px', borderRadius: 14,
+          display: 'flex', flexWrap: 'wrap',
+          justifyContent: 'space-between', alignItems: 'center', gap: 10,
         }}>
-          <div style={{ fontSize: 20, fontWeight: 'bold' }}>
+          <div style={{ fontSize: 18, fontWeight: 'bold', lineHeight: 1.2 }}>
             🛒 AI Shopping for Budgeting
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
-            <button
-              onClick={async () => {
-                if (!confirm('Seed 100 products into Firestore? This replaces existing products.')) return;
-                try {
-                  await seedProducts();
-                  alert('✅ Products seeded!');
-                  window.location.reload();
-                } catch (e) {
-                  console.error(e);
-                  alert('❌ Seed failed: ' + e.message);
-                }
-              }}
-              style={{
-                background: 'rgba(255,255,255,0.2)', color: 'white',
-                border: 'none', padding: '6px 12px', borderRadius: 6,
-                fontSize: 12, fontWeight: 'bold', cursor: 'pointer',
-              }}
-            >
-              🌱 Seed
-            </button>
             {isAdmin && (
-             <button
-               onClick={() => setShowAdmin(true)}
-               style={{
-                 background: 'rgba(255,255,255,0.3)', color: 'white',
-                 border: 'none', padding: '8px 12px', borderRadius: 8,
-                 fontSize: 12, fontWeight: 'bold', cursor: 'pointer',
-               }}
-             >
-               ⚙️ Admin
-             </button>
-           )}
+              <button
+                onClick={() => setShowAdmin(true)}
+                style={{
+                  background: 'rgba(255,255,255,0.3)', color: 'white',
+                  border: 'none', padding: '8px 12px', borderRadius: 8,
+                  fontSize: 12, fontWeight: 'bold', cursor: 'pointer',
+                }}
+              >
+                ⚙️ Admin
+              </button>
+            )}
             <button
               onClick={() => {
-                 signOut(auth);
-                 setAuthView('landing');
-                 setAuthRole('student');
+                signOut(auth);
+                setAuthView('landing');
+                setAuthRole('student');
               }}
               style={{
                 background: 'rgba(255,255,255,0.2)', color: 'white',
-                border: 'none', padding: '6px 12px', borderRadius: 6,
+                border: 'none', padding: '8px 12px', borderRadius: 8,
                 fontSize: 12, fontWeight: 'bold', cursor: 'pointer',
               }}
             >
@@ -583,16 +546,15 @@ Rules:
           </div>
         </div>
 
-        <div style={{ marginTop: 6, fontSize: 11, color: '#777', textAlign: 'right' }}>
+        <div style={{ marginTop: 8, fontSize: 11, color: '#777', textAlign: 'right' }}>
           Signed in as {user?.email}
         </div>
-
-        <div style={{ marginTop: 6, fontSize: 11, color: '#777', textAlign: 'center' }}>
+        <div style={{ marginTop: 4, fontSize: 11, color: '#777', textAlign: 'center' }}>
           {dbStatus}
         </div>
 
         {/* Search */}
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 14 }}>
           <input
             type="text"
             placeholder="🔍 Search products... e.g. bread, hoodie, soap"
@@ -601,9 +563,10 @@ Rules:
             onBlur={() => trackSearch(search)}
             onKeyDown={e => e.key === 'Enter' && trackSearch(search)}
             style={{
-              width: '100%', boxSizing: 'border-box', padding: 14,
-              border: '2px solid #6c5ce7', borderRadius: 10,
-              fontSize: 15, background: 'white',
+              width: '100%', boxSizing: 'border-box',
+              padding: 14, border: '2px solid #6c5ce7',
+              borderRadius: 12, fontSize: 16,
+              background: 'white', WebkitAppearance: 'none',
             }}
           />
         </div>
@@ -618,8 +581,9 @@ Rules:
                 onClick={() => setSearch(s.query)}
                 style={{
                   background: '#eef1ff', color: '#6c5ce7',
-                  border: 'none', padding: '4px 10px',
-                  borderRadius: 12, fontSize: 12, cursor: 'pointer',
+                  border: 'none', padding: '6px 12px',
+                  borderRadius: 14, fontSize: 12, cursor: 'pointer',
+                  minHeight: 32,
                 }}
               >
                 {s.query}
@@ -629,17 +593,23 @@ Rules:
         )}
 
         {/* Category pills */}
-        <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{
+          marginTop: 14, display: 'flex', gap: 8,
+          overflowX: 'auto', paddingBottom: 4,
+          WebkitOverflowScrolling: 'touch',
+        }}>
           {CATEGORIES.map(cat => (
             <button
               key={cat}
               onClick={() => setCategory(cat)}
               style={{
-                padding: '7px 14px', borderRadius: 20, border: '1px solid #6c5ce7',
+                padding: '8px 16px', borderRadius: 20,
+                border: '1px solid #6c5ce7',
                 background: category === cat ? '#6c5ce7' : 'white',
                 color: category === cat ? 'white' : '#6c5ce7',
                 fontSize: 13, fontWeight: 'bold', cursor: 'pointer',
-                textTransform: 'capitalize',
+                textTransform: 'capitalize', whiteSpace: 'nowrap',
+                flexShrink: 0, minHeight: 36,
               }}
             >
               {cat}
@@ -648,23 +618,33 @@ Rules:
         </div>
 
         {/* Sort + Max price */}
-        <div style={{ marginTop: 12, display: 'flex', gap: 10 }}>
+        <div style={{
+          marginTop: 14, display: 'grid',
+          gridTemplateColumns: '1fr 140px', gap: 10,
+        }}>
           <select
             value={sortBy}
             onChange={e => setSortBy(e.target.value)}
-            style={{ flex: 1, padding: 10, border: '1px solid #ddd', borderRadius: 6, fontSize: 13, background: 'white' }}
+            style={{
+              padding: 12, border: '1px solid #ddd',
+              borderRadius: 8, fontSize: 14, background: 'white',
+              WebkitAppearance: 'none', minHeight: 44,
+            }}
           >
             <option value="ai">🧠 AI Best Match</option>
             <option value="cheapest">💰 Cheapest first</option>
             <option value="priciest">💎 Most expensive first</option>
           </select>
-
           <input
             type="number"
-            placeholder="Max price (R)"
+            placeholder="Max R"
             value={maxPrice}
             onChange={e => setMaxPrice(e.target.value)}
-            style={{ width: 140, padding: 10, border: '1px solid #ddd', borderRadius: 6, fontSize: 13, background: 'white', boxSizing: 'border-box' }}
+            style={{
+              padding: 12, border: '1px solid #ddd',
+              borderRadius: 8, fontSize: 14, background: 'white',
+              boxSizing: 'border-box', minHeight: 44,
+            }}
           />
         </div>
 
@@ -676,10 +656,12 @@ Rules:
             style={{
               flex: 1,
               background: aiLoading ? '#aaa' : 'linear-gradient(90deg, #6c5ce7, #a29bfe)',
-              color: 'white', border: 'none', padding: '12px 15px',
-              borderRadius: 8, fontSize: 14, fontWeight: 'bold',
+              color: 'white', border: 'none',
+              padding: '14px 16px', borderRadius: 10,
+              fontSize: 15, fontWeight: 'bold',
               cursor: aiLoading ? 'wait' : 'pointer',
               boxShadow: '0 2px 6px rgba(108,92,231,0.3)',
+              minHeight: 48,
             }}
           >
             {aiLoading ? '🧠 AI is thinking...' : '🧠 Rank with AI'}
@@ -688,154 +670,33 @@ Rules:
             <button
               onClick={clearAI}
               style={{
-                background: 'white', color: '#6c5ce7', border: '1px solid #6c5ce7',
-                padding: '12px 15px', borderRadius: 8, fontSize: 13,
-                fontWeight: 'bold', cursor: 'pointer',
+                background: 'white', color: '#6c5ce7',
+                border: '1px solid #6c5ce7',
+                padding: '14px 16px', borderRadius: 10,
+                fontSize: 13, fontWeight: 'bold', cursor: 'pointer',
+                minHeight: 48,
               }}
             >
-              ✕ Clear AI
+              ✕
             </button>
           )}
         </div>
 
         {aiError && (
-          <div style={{ marginTop: 10, padding: 10, background: '#fff3cd', color: '#856404', borderRadius: 6, fontSize: 13 }}>
+          <div style={{ marginTop: 10, padding: 12, background: '#fff3cd', color: '#856404', borderRadius: 8, fontSize: 13 }}>
             {aiError}
           </div>
         )}
-
         {aiResults && (
-          <div style={{ marginTop: 10, padding: 10, background: '#d4edda', color: '#155724', borderRadius: 6, fontSize: 13 }}>
+          <div style={{ marginTop: 10, padding: 12, background: '#d4edda', color: '#155724', borderRadius: 8, fontSize: 13 }}>
             ✅ Ranked by Gemini AI
           </div>
         )}
 
-        {/* Recently viewed */}
-        {recentViews.length > 0 && (
-          <div style={{ marginTop: 16, background: 'white', padding: 14, borderRadius: 10, border: '1px solid #eee' }}>
-            <div style={{
-              display: 'flex', justifyContent: 'space-between',
-              alignItems: 'center', marginBottom: 8,
-            }}>
-              <div style={{ fontSize: 13, fontWeight: 'bold', color: '#333' }}>
-                🕒 Recently Viewed
-              </div>
-              <button
-                onClick={clearHistory}
-                style={{
-                  background: 'none', border: 'none', color: '#999',
-                  fontSize: 11, cursor: 'pointer',
-                }}
-              >
-                Clear history
-              </button>
-            </div>
-            {recentViews.map(v => (
-              <div key={v.ts} style={{
-                fontSize: 12, color: '#555',
-                padding: '4px 0', borderBottom: '1px solid #f5f5f5',
-              }}>
-                {v.name}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Results */}
-        <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 13, color: '#777', marginBottom: 8 }}>
-            {filtered.length} product{filtered.length !== 1 ? 's' : ''} found
-            {sortBy === 'ai' && (aiResults ? ' • ranked by Gemini AI' : ' • ranked by rules')}
-          </div>
-
-          {filtered.length === 0 ? (
-            <div style={{ background: 'white', padding: 20, borderRadius: 8, textAlign: 'center', color: '#888', fontSize: 14 }}>
-              No products match your filters
-            </div>
-          ) : (
-            filtered.map((p, idx) => {
-              const fitsBudget = p.price <= remaining;
-              const isTop = sortBy === 'ai' && idx === 0 && p.aiScore > 0;
-              return (
-                <div
-                  key={p.id}
-                  onClick={() => trackView(p)}
-                  style={{
-                    background: 'white', padding: '14px 18px', marginTop: 8,
-                    borderRadius: 8,
-                    border: isTop ? '2px solid #6c5ce7' : '1px solid #eee',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {isTop && (
-                    <div style={{
-                      display: 'inline-block', background: '#6c5ce7', color: 'white',
-                      fontSize: 11, fontWeight: 'bold', padding: '3px 8px',
-                      borderRadius: 4, marginBottom: 6,
-                    }}>
-                      🏆 BEST MATCH
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                   {/* Thumbnail */}
-                   {p.imageUrl && (
-                     <img
-                       src={p.imageUrl}
-                       alt={p.name}
-                       loading="lazy"
-                       onError={(e) => { e.target.style.display = 'none'; }}
-                       style={{
-                         width: 64,
-                         height: 64,
-                         objectFit: 'cover',
-                         borderRadius: 8,
-                         flexShrink: 0,
-                         background: '#f0f0f0',
-                       }}
-                     />
-                   )}
-                   <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 'bold', fontSize: 15, lineHeight: 1.3 }}>{p.name}</div>
-                      <div style={{ fontSize: 12, color: '#888', marginTop: 2 }}>
-                        {p.store} • {p.color} • {p.size}
-                      </div>
-                      <div style={{ fontSize: 12, color: '#6c5ce7', marginTop: 6, lineHeight: 1.4 }}>
-                        {aiResults ? '🧠 ' : '📊 '}{p.aiReason}
-                      </div>
-                    </div>
-                    <div style={{ textAlign: 'right', marginLeft: 12 }}>
-                      <div style={{ fontWeight: 'bold', fontSize: 15 }}>R{p.price}</div>
-                      {sortBy === 'ai' && (
-                        <div style={{ fontSize: 11, color: '#6c5ce7', marginTop: 2 }}>
-                          score {p.aiScore}
-                        </div>
-                      )}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); addProductToList(p); }}
-                        disabled={!fitsBudget}
-                        style={{
-                          marginTop: 6,
-                          background: fitsBudget ? '#00b894' : '#ccc',
-                          color: 'white', border: 'none',
-                          padding: '6px 12px', borderRadius: 6,
-                          fontSize: 12, fontWeight: 'bold',
-                          cursor: fitsBudget ? 'pointer' : 'not-allowed',
-                        }}
-                      >
-                        {fitsBudget ? '+ Add' : 'Over budget'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-
-        {/* Budget */}
+        {/* ⭐ BUDGET CARD — MOVED UP HERE */}
         <div style={{
-          background: 'white', padding: 25, borderRadius: 12,
-          marginTop: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+          background: 'white', padding: 20, borderRadius: 12,
+          marginTop: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
         }}>
           <h3 style={{ margin: 0, marginBottom: 12, fontSize: 18 }}>My Budget: R{budget}</h3>
           <input type="number" value={budget} onChange={e => setBudget(Number(e.target.value))} style={inputStyle} />
@@ -843,30 +704,20 @@ Rules:
             Total Spent: <b>R{total}</b> | Remaining:{' '}
             <b style={{ color: remaining < 0 ? 'red' : 'green' }}>R{remaining}</b>
           </p>
-          <div style={{ background: '#eef1ff', padding: 14, borderRadius: 8, fontSize: 14, lineHeight: 1.5, color: '#333' }}>
+          <div style={{ background: '#eef1ff', padding: 14, borderRadius: 10, fontSize: 14, lineHeight: 1.5, color: '#333' }}>
             {getSuggestion()}
           </div>
           <button
             onClick={() => setShowPrefs(!showPrefs)}
-            style={{
-              marginTop: 15, width: '100%',
-              background: showPrefs ? '#6c5ce7' : 'white',
-              color: showPrefs ? 'white' : '#6c5ce7',
-              border: '2px solid #6c5ce7', padding: '10px 15px',
-              borderRadius: 6, fontSize: 14, fontWeight: 'bold',
-              cursor: 'pointer',
-            }}
+            style={{ ...(showPrefs ? primaryButton : outlineButton), marginTop: 15 }}
           >
             {showPrefs ? '✕ Close Preferences' : '⚙️ Set Preferences'}
           </button>
         </div>
 
-        {/* Preferences */}
+        {/* Preferences panel — right below budget */}
         {showPrefs && (
-          <div style={{
-            background: 'white', padding: 25, borderRadius: 12,
-            marginTop: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-          }}>
+          <div style={{ background: 'white', padding: 20, borderRadius: 12, marginTop: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
             <h3 style={{ margin: 0, marginBottom: 5, fontSize: 18 }}>Shopping Preferences</h3>
             <p style={{ margin: 0, marginBottom: 15, fontSize: 13, color: '#777' }}>
               🧠 Gemini uses these to rank products for you.
@@ -899,23 +750,123 @@ Rules:
 
             <button
               onClick={() => setShowPrefs(false)}
-              style={{
-                marginTop: 20, width: '100%', background: '#00b894',
-                color: 'white', border: 'none', padding: '12px 15px',
-                borderRadius: 6, fontSize: 14, fontWeight: 'bold',
-                cursor: 'pointer',
-              }}
+              style={{ ...primaryButton, marginTop: 20, background: '#00b894' }}
             >
               ✓ Save Preferences
             </button>
           </div>
         )}
 
+        {/* Recently viewed */}
+        {recentViews.length > 0 && (
+          <div style={{ marginTop: 16, background: 'white', padding: 16, borderRadius: 12, border: '1px solid #eee' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 'bold', color: '#333' }}>🕒 Recently Viewed</div>
+              <button
+                onClick={clearHistory}
+                style={{ background: 'none', border: 'none', color: '#999', fontSize: 11, cursor: 'pointer', padding: 4 }}
+              >
+                Clear history
+              </button>
+            </div>
+            {recentViews.map(v => (
+              <div key={v.ts} style={{ fontSize: 13, color: '#555', padding: '6px 0', borderBottom: '1px solid #f5f5f5' }}>
+                {v.name}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Results */}
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 13, color: '#777', marginBottom: 8 }}>
+            {filtered.length} product{filtered.length !== 1 ? 's' : ''} found
+            {sortBy === 'ai' && (aiResults ? ' • ranked by Gemini AI' : ' • ranked by rules')}
+          </div>
+
+          {filtered.length === 0 ? (
+            <div style={{ background: 'white', padding: 24, borderRadius: 12, textAlign: 'center', color: '#888', fontSize: 14 }}>
+              No products match your filters
+            </div>
+          ) : (
+            filtered.map((p, idx) => {
+              const fitsBudget = p.price <= remaining;
+              const isTop = sortBy === 'ai' && idx === 0 && p.aiScore > 0;
+              return (
+                <div
+                  key={p.id}
+                  onClick={() => trackView(p)}
+                  style={{
+                    background: 'white', padding: '14px 16px', marginTop: 10,
+                    borderRadius: 12,
+                    border: isTop ? '2px solid #6c5ce7' : '1px solid #eee',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {isTop && (
+                    <div style={{
+                      display: 'inline-block', background: '#6c5ce7', color: 'white',
+                      fontSize: 11, fontWeight: 'bold', padding: '3px 8px',
+                      borderRadius: 4, marginBottom: 8,
+                    }}>
+                      🏆 BEST MATCH
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                    {p.imageUrl && (
+                      <img
+                        src={p.imageUrl}
+                        alt={p.name}
+                        loading="lazy"
+                        onError={(e) => { e.target.style.display = 'none'; }}
+                        style={{
+                          width: 72, height: 72, objectFit: 'cover',
+                          borderRadius: 8, flexShrink: 0, background: '#f0f0f0',
+                        }}
+                      />
+                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 'bold', fontSize: 15, lineHeight: 1.3 }}>{p.name}</div>
+                      <div style={{ fontSize: 12, color: '#888', marginTop: 3 }}>
+                        {p.store} • {p.color} • {p.size}
+                      </div>
+                      <div style={{ fontSize: 12, color: '#6c5ce7', marginTop: 8, lineHeight: 1.4 }}>
+                        {aiResults ? '🧠 ' : '📊 '}{p.aiReason}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div style={{ fontWeight: 'bold', fontSize: 15 }}>R{p.price}</div>
+                      {sortBy === 'ai' && (
+                        <div style={{ fontSize: 11, color: '#6c5ce7', marginTop: 2 }}>score {p.aiScore}</div>
+                      )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); addProductToList(p); }}
+                        disabled={!fitsBudget}
+                        style={{
+                          marginTop: 8,
+                          background: fitsBudget ? '#00b894' : '#ccc',
+                          color: 'white', border: 'none',
+                          padding: '8px 14px', borderRadius: 8,
+                          fontSize: 12, fontWeight: 'bold',
+                          cursor: fitsBudget ? 'pointer' : 'not-allowed',
+                          minHeight: 36,
+                        }}
+                      >
+                        {fitsBudget ? '+ Add' : 'Over budget'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
         {/* Manual add */}
-        <div style={{ marginTop: 20, display: 'flex', gap: 10 }}>
-          <input placeholder="Item name e.g Bread" value={name} onChange={e => setName(e.target.value)} style={{ flex: 1, padding: 12, border: '1px solid #ddd', borderRadius: 6, fontSize: 14 }} />
-          <input placeholder="Price" type="number" value={price} onChange={e => setPrice(e.target.value)} style={{ width: 90, padding: 12, border: '1px solid #ddd', borderRadius: 6, fontSize: 14 }} />
-          <button onClick={addItem} style={{ background: '#00b894', color: 'white', border: 'none', padding: '12px 20px', borderRadius: 6, fontSize: 14, fontWeight: 'bold', cursor: 'pointer' }}>
+        <div style={{ marginTop: 20, display: 'grid', gridTemplateColumns: '1fr 100px auto', gap: 8 }}>
+          <input placeholder="Item name" value={name} onChange={e => setName(e.target.value)} style={{ padding: 12, border: '1px solid #ddd', borderRadius: 8, fontSize: 16, WebkitAppearance: 'none', minWidth: 0 }} />
+          <input placeholder="Price" type="number" value={price} onChange={e => setPrice(e.target.value)} style={{ padding: 12, border: '1px solid #ddd', borderRadius: 8, fontSize: 16, WebkitAppearance: 'none', minWidth: 0 }} />
+          <button onClick={addItem} style={{ background: '#00b894', color: 'white', border: 'none', padding: '12px 16px', borderRadius: 8, fontSize: 14, fontWeight: 'bold', cursor: 'pointer', minHeight: 48 }}>
             Add
           </button>
         </div>
@@ -926,14 +877,15 @@ Rules:
             <div key={it.id} style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               background: 'white', border: '1px solid #eee',
-              padding: '14px 18px', marginTop: 8, borderRadius: 8, fontSize: 15,
+              padding: '14px 16px', marginTop: 8, borderRadius: 10, fontSize: 15,
             }}>
-              <span>{it.name}</span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{it.name}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
                 R{it.price}
                 <button onClick={() => removeItem(it.id)} style={{
                   color: 'red', border: 'none', background: 'transparent',
-                  cursor: 'pointer', fontSize: 16, fontWeight: 'bold',
+                  cursor: 'pointer', fontSize: 18, fontWeight: 'bold',
+                  padding: 4, minWidth: 32, minHeight: 32,
                 }}>
                   ✕
                 </button>
@@ -943,6 +895,21 @@ Rules:
         </div>
 
       </div>
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: 24, left: '50%',
+          transform: 'translateX(-50%)',
+          background: '#2d3436', color: 'white',
+          padding: '12px 20px', borderRadius: 10,
+          fontSize: 14, fontWeight: 'bold',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+          zIndex: 9999, maxWidth: '90vw', textAlign: 'center',
+        }}>
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
